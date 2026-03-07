@@ -136,6 +136,13 @@ public final class TermuxPreferenceConstants {
          */
         public static final String KEY_CURRENT_SESSION = "current_session";
 
+        /**
+         * Defines the key for whether warning dialog for creating terminal sessions past 8 has
+         * been shown or not.
+         */
+        public static final String KEY_PAST_EIGHT_SESSIONS_WARNING_SHOWN = "past_eight_sessions_warning_shown";
+        public static final boolean DEFAULT_VALUE_PAST_EIGHT_SESSIONS_WARNING_SHOWN = false;
+
 
         /**
          * Defines the key for current log level.

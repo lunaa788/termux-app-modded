@@ -42,7 +42,9 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
 
     private final TermuxActivity mActivity;
 
-    private static final int MAX_SESSIONS = 8;
+    private static final int PAST_EIGHT_SESSIONS_WARNING_THRESHOLD = 8;
+
+    private static final int MAX_SESSIONS = 100;
 
     private SoundPool mBellSoundPool;
 
@@ -365,27 +367,44 @@ public class TermuxTerminalSessionActivityClient extends TermuxTerminalSessionCl
         TermuxService service = mActivity.getTermuxService();
         if (service == null) return;
 
-        if (service.getTermuxSessionsSize() >= MAX_SESSIONS) {
+        int sessionsSize = service.getTermuxSessionsSize();
+
+        if (sessionsSize >= MAX_SESSIONS) {
             new AlertDialog.Builder(mActivity).setTitle(R.string.title_max_terminals_reached).setMessage(R.string.msg_max_terminals_reached)
                 .setPositiveButton(android.R.string.ok, null).show();
+        } else if (sessionsSize >= PAST_EIGHT_SESSIONS_WARNING_THRESHOLD &&
+            !mActivity.getPreferences().isPastEightSessionsWarningShown()) {
+            // Only show this warning once after crossing 8 sessions.
+            mActivity.getPreferences().setPastEightSessionsWarningShown(true);
+            new AlertDialog.Builder(mActivity)
+                .setTitle(R.string.title_past_eight_sessions_warning)
+                .setMessage(R.string.msg_past_eight_sessions_warning)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.action_okay, (dialog, which) ->
+                    createAndSwitchToNewSession(service, isFailSafe, sessionName))
+                .show();
         } else {
-            TerminalSession currentSession = mActivity.getCurrentSession();
-
-            String workingDirectory;
-            if (currentSession == null) {
-                workingDirectory = mActivity.getProperties().getDefaultWorkingDirectory();
-            } else {
-                workingDirectory = currentSession.getCwd();
-            }
-
-            TermuxSession newTermuxSession = service.createTermuxSession(null, null, null, workingDirectory, isFailSafe, sessionName);
-            if (newTermuxSession == null) return;
-
-            TerminalSession newTerminalSession = newTermuxSession.getTerminalSession();
-            setCurrentSession(newTerminalSession);
-
-            mActivity.getDrawer().closeDrawers();
+            createAndSwitchToNewSession(service, isFailSafe, sessionName);
         }
+    }
+
+    private void createAndSwitchToNewSession(TermuxService service, boolean isFailSafe, String sessionName) {
+        TerminalSession currentSession = mActivity.getCurrentSession();
+
+        String workingDirectory;
+        if (currentSession == null) {
+            workingDirectory = mActivity.getProperties().getDefaultWorkingDirectory();
+        } else {
+            workingDirectory = currentSession.getCwd();
+        }
+
+        TermuxSession newTermuxSession = service.createTermuxSession(null, null, null, workingDirectory, isFailSafe, sessionName);
+        if (newTermuxSession == null) return;
+
+        TerminalSession newTerminalSession = newTermuxSession.getTerminalSession();
+        setCurrentSession(newTerminalSession);
+
+        mActivity.getDrawer().closeDrawers();
     }
 
     public void setCurrentStoredSession() {

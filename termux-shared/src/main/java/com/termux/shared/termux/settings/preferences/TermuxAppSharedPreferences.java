@@ -179,6 +179,15 @@ public class TermuxAppSharedPreferences extends AppSharedPreferences {
         SharedPreferenceUtils.setString(mSharedPreferences, TERMUX_APP.KEY_CURRENT_SESSION, value, false);
     }
 
+    public boolean isPastEightSessionsWarningShown() {
+        return SharedPreferenceUtils.getBoolean(mSharedPreferences, TERMUX_APP.KEY_PAST_EIGHT_SESSIONS_WARNING_SHOWN,
+            TERMUX_APP.DEFAULT_VALUE_PAST_EIGHT_SESSIONS_WARNING_SHOWN);
+    }
+
+    public void setPastEightSessionsWarningShown(boolean value) {
+        SharedPreferenceUtils.setBoolean(mSharedPreferences, TERMUX_APP.KEY_PAST_EIGHT_SESSIONS_WARNING_SHOWN, value, false);
+    }
+
 
 
     public int getLogLevel() {
