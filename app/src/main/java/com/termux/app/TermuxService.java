@@ -98,9 +98,15 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
      */
     private TermuxShellManager mShellManager;
 
-    /** The wake lock and wifi lock are always acquired and released together. */
+    /** Active wake locks held by the service. */
     private PowerManager.WakeLock mWakeLock;
     private WifiManager.WifiLock mWifiLock;
+    /** True if user explicitly enabled wakelock from notification action. */
+    private boolean mManualWakeLockRequested;
+    /** True if `Keep screen on` preference should auto-manage background wakelock. */
+    private boolean mAutoWakeLockAllowedByPreference;
+    /** Current visibility of {@link TermuxActivity}. */
+    private boolean mIsTermuxActivityVisible = true;
 
     /** If the user has executed the {@link TERMUX_SERVICE#ACTION_STOP_SERVICE} intent. */
     boolean mWantsToStop = false;
@@ -171,7 +177,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
         TermuxShellUtils.clearTermuxTMPDIR(true);
 
-        actionReleaseWakeLock(false);
+        forceReleaseWakeLocks(false);
         if (!mWantsToStop)
             killAllTermuxExecutionCommands();
 
@@ -198,6 +204,15 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         if (mTermuxTerminalSessionActivityClient != null)
             unsetTermuxTerminalSessionClient();
         return false;
+    }
+
+    /**
+     * Sync activity visibility and user preference state for auto background wakelock handling.
+     */
+    public synchronized void syncActivityVisibilityAndKeepScreenOn(boolean isActivityVisible, boolean keepScreenOnEnabled) {
+        mIsTermuxActivityVisible = isActivityVisible;
+        mAutoWakeLockAllowedByPreference = keepScreenOnEnabled;
+        reconcileWakeLocks(true, false);
     }
 
     /** Make service run in foreground mode. */
@@ -302,39 +317,89 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
     /** Process action to acquire Power and Wi-Fi WakeLocks. */
     @SuppressLint({"WakelockTimeout", "BatteryLife"})
-    private void actionAcquireWakeLock() {
-        if (mWakeLock != null) {
-            Logger.logDebug(LOG_TAG, "Ignoring acquiring WakeLocks since they are already held");
+    private synchronized void actionAcquireWakeLock() {
+        if (mManualWakeLockRequested) {
+            Logger.logDebug(LOG_TAG, "Ignoring acquiring WakeLocks since manual wakelock is already requested");
             return;
         }
 
-        Logger.logDebug(LOG_TAG, "Acquiring WakeLocks");
-
-        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TermuxConstants.TERMUX_APP_NAME.toLowerCase() + ":service-wakelock");
-        mWakeLock.acquire();
-
-        // http://tools.android.com/tech-docs/lint-in-studio-2-3#TOC-WifiManager-Leak
-        WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-        mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, TermuxConstants.TERMUX_APP_NAME.toLowerCase());
-        mWifiLock.acquire();
-
-        if (!PermissionUtils.checkIfBatteryOptimizationsDisabled(this)) {
-            PermissionUtils.requestDisableBatteryOptimizations(this);
-        }
-
-        updateNotification();
-
-        Logger.logDebug(LOG_TAG, "WakeLocks acquired successfully");
-
+        Logger.logDebug(LOG_TAG, "Enabling manual WakeLocks");
+        mManualWakeLockRequested = true;
+        reconcileWakeLocks(true, true);
     }
 
     /** Process action to release Power and Wi-Fi WakeLocks. */
-    private void actionReleaseWakeLock(boolean updateNotification) {
-        if (mWakeLock == null && mWifiLock == null) {
-            Logger.logDebug(LOG_TAG, "Ignoring releasing WakeLocks since none are already held");
+    private synchronized void actionReleaseWakeLock(boolean updateNotification) {
+        if (!mManualWakeLockRequested) {
+            Logger.logDebug(LOG_TAG, "Ignoring releasing manual WakeLocks since they are already disabled");
             return;
         }
+
+        Logger.logDebug(LOG_TAG, "Disabling manual WakeLocks");
+        mManualWakeLockRequested = false;
+        reconcileWakeLocks(updateNotification, false);
+    }
+
+    /**
+     * Force release all wake locks without preserving manual/auto request state.
+     */
+    private synchronized void forceReleaseWakeLocks(boolean updateNotification) {
+        mManualWakeLockRequested = false;
+        mAutoWakeLockAllowedByPreference = false;
+        releaseWakeLocks(updateNotification);
+    }
+
+    private synchronized void reconcileWakeLocks(boolean updateNotification, boolean requestBatteryOptimizationsDisable) {
+        if (shouldHoldAnyWakeLock()) {
+            acquireWakeLocks();
+            if (requestBatteryOptimizationsDisable && mManualWakeLockRequested &&
+                !PermissionUtils.checkIfBatteryOptimizationsDisabled(this)) {
+                PermissionUtils.requestDisableBatteryOptimizations(this);
+            }
+        } else {
+            releaseWakeLocks(false);
+        }
+
+        if (updateNotification)
+            updateNotification();
+    }
+
+    private boolean shouldHoldAnyWakeLock() {
+        return mManualWakeLockRequested || shouldHoldAutoWakeLock();
+    }
+
+    private boolean shouldHoldAutoWakeLock() {
+        return mAutoWakeLockAllowedByPreference && !mIsTermuxActivityVisible && hasActiveSessionsOrTasks();
+    }
+
+    private boolean hasActiveSessionsOrTasks() {
+        return !(mShellManager.mTermuxSessions.isEmpty() && mShellManager.mTermuxTasks.isEmpty());
+    }
+
+    @SuppressLint("WakelockTimeout")
+    private void acquireWakeLocks() {
+        if (mWakeLock != null && mWifiLock != null) return;
+
+        Logger.logDebug(LOG_TAG, "Acquiring WakeLocks");
+
+        if (mWakeLock == null) {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            mWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, TermuxConstants.TERMUX_APP_NAME.toLowerCase() + ":service-wakelock");
+            mWakeLock.acquire();
+        }
+
+        if (mWifiLock == null) {
+            // http://tools.android.com/tech-docs/lint-in-studio-2-3#TOC-WifiManager-Leak
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            mWifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, TermuxConstants.TERMUX_APP_NAME.toLowerCase());
+            mWifiLock.acquire();
+        }
+
+        Logger.logDebug(LOG_TAG, "WakeLocks acquired successfully");
+    }
+
+    private void releaseWakeLocks(boolean updateNotification) {
+        if (mWakeLock == null && mWifiLock == null) return;
 
         Logger.logDebug(LOG_TAG, "Releasing WakeLocks");
 
@@ -348,10 +413,10 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
             mWifiLock = null;
         }
 
+        Logger.logDebug(LOG_TAG, "WakeLocks released successfully");
+
         if (updateNotification)
             updateNotification();
-
-        Logger.logDebug(LOG_TAG, "WakeLocks released successfully");
     }
 
     /** Process {@link TERMUX_SERVICE#ACTION_SERVICE_EXECUTE} intent to execute a shell command in
@@ -498,7 +563,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         if (executionCommand.isPluginExecutionCommand)
             mShellManager.mPendingPluginExecutionCommands.remove(executionCommand);
 
-        updateNotification();
+        reconcileWakeLocks(true, false);
 
         return newTermuxTask;
     }
@@ -519,7 +584,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
                 mShellManager.mTermuxTasks.remove(termuxTask);
             }
 
-            updateNotification();
+            reconcileWakeLocks(true, false);
         });
     }
 
@@ -617,7 +682,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         if (mTermuxTerminalSessionActivityClient != null)
             mTermuxTerminalSessionActivityClient.termuxSessionListNotifyUpdated();
 
-        updateNotification();
+        reconcileWakeLocks(true, false);
 
         // No need to recreate the activity since it likely just started and theme should already have applied
         TermuxActivity.updateTermuxActivityStyling(this, false);
@@ -655,7 +720,7 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
                 mTermuxTerminalSessionActivityClient.termuxSessionListNotifyUpdated();
         }
 
-        updateNotification();
+        reconcileWakeLocks(true, false);
     }
 
 
@@ -796,7 +861,9 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
         }
 
         final boolean wakeLockHeld = mWakeLock != null;
-        if (wakeLockHeld) notificationText += " (wake lock held)";
+        final boolean manualWakeLockRequested = mManualWakeLockRequested;
+        if (wakeLockHeld)
+            notificationText += manualWakeLockRequested ? " (wake lock held)" : " (auto wake lock held)";
 
 
         // Set notification priority
@@ -831,10 +898,10 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
 
         // Set Wakelock button actions
-        String newWakeAction = wakeLockHeld ? TERMUX_SERVICE.ACTION_WAKE_UNLOCK : TERMUX_SERVICE.ACTION_WAKE_LOCK;
+        String newWakeAction = manualWakeLockRequested ? TERMUX_SERVICE.ACTION_WAKE_UNLOCK : TERMUX_SERVICE.ACTION_WAKE_LOCK;
         Intent toggleWakeLockIntent = new Intent(this, TermuxService.class).setAction(newWakeAction);
-        String actionTitle = res.getString(wakeLockHeld ? R.string.notification_action_wake_unlock : R.string.notification_action_wake_lock);
-        int actionIcon = wakeLockHeld ? android.R.drawable.ic_lock_idle_lock : android.R.drawable.ic_lock_lock;
+        String actionTitle = res.getString(manualWakeLockRequested ? R.string.notification_action_wake_unlock : R.string.notification_action_wake_lock);
+        int actionIcon = manualWakeLockRequested ? android.R.drawable.ic_lock_idle_lock : android.R.drawable.ic_lock_lock;
         builder.addAction(actionIcon, actionTitle, PendingIntent.getService(this, 0, toggleWakeLockIntent, 0));
 
 
@@ -850,7 +917,8 @@ public final class TermuxService extends Service implements AppShell.AppShellCli
 
     /** Update the shown foreground service notification after making any changes that affect it. */
     private synchronized void updateNotification() {
-        if (mWakeLock == null && mShellManager.mTermuxSessions.isEmpty() && mShellManager.mTermuxTasks.isEmpty()) {
+        if (mWakeLock == null && mWifiLock == null &&
+            mShellManager.mTermuxSessions.isEmpty() && mShellManager.mTermuxTasks.isEmpty()) {
             // Exit if we are updating after the user disabled all locks with no sessions or tasks running.
             requestStopService();
         } else {

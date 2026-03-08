@@ -299,6 +299,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             addTermuxActivityRootViewGlobalLayoutListener();
 
         registerTermuxActivityBroadcastReceiver();
+        syncServiceKeepScreenOnWakeLockState();
     }
 
     @Override
@@ -331,6 +332,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         if (mIsInvalidState) return;
 
         mIsVisible = false;
+        syncServiceKeepScreenOnWakeLockState();
 
         if (mTermuxTerminalSessionActivityClient != null)
             mTermuxTerminalSessionActivityClient.onStop();
@@ -427,6 +429,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
 
         // Update the {@link TerminalSession} and {@link TerminalEmulator} clients.
         mTermuxService.setTermuxTerminalSessionClient(mTermuxTerminalSessionActivityClient);
+        syncServiceKeepScreenOnWakeLockState();
     }
 
     @Override
@@ -756,6 +759,12 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
             mTerminalView.setKeepScreenOn(true);
             mPreferences.setKeepScreenOn(true);
         }
+        syncServiceKeepScreenOnWakeLockState();
+    }
+
+    private void syncServiceKeepScreenOnWakeLockState() {
+        if (mTermuxService == null) return;
+        mTermuxService.syncActivityVisibilityAndKeepScreenOn(mIsVisible, mPreferences.shouldKeepScreenOn());
     }
 
 
